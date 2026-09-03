@@ -71,6 +71,7 @@ typedef struct
 }tLife_Type;
 extern  volatile tLife_Type tLife;
 /************************************TX,RX*******************************************************/
+//U2
 typedef struct
 {
   uint8_t Data[16];
@@ -85,6 +86,24 @@ typedef struct
 
 }tUsart2_TX_Type;
 extern volatile tUsart2_TX_Type tUsart2_TX;
+
+//U3
+typedef struct
+{
+  uint8_t Data[16];
+  uint8_t Index;
+  uint32_t Tick; 	
+}tUsart3_RX_Type;
+extern volatile tUsart3_RX_Type tUsart3_RX;
+
+typedef struct
+{
+  uint8_t Data[16];
+  uint8_t Index;	
+
+}tUsart3_TX_Type;
+extern volatile tUsart3_TX_Type tUsart3_TX;
+
 /***********************************½Ç¶È´«¸ÐÆ÷*************************************************************/
 
 typedef struct

@@ -7,6 +7,8 @@
 #include <rtthread.h>
 
 void RS485_SendText(uint8_t Data1);
+void RS485_SendTextU3(uint8_t Data1);
+
 void RS485_ReciveText(uint8_t Data1);
 void RS485Send_ReadSingleRingOrder(void);
 void RS485Recive_SingleRingValue(void);

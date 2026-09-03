@@ -24,7 +24,7 @@
 #include "define.h"
 #include "motor.h"
 #include "Pressure.h"
-
+#include "ModBus.h"
 /* 潘多拉板板载 LED（PE7，与裸机工程"实验0-1"一致） */
 #define LED_PIN             PIN_LED_R
 
@@ -81,11 +81,12 @@ int main(void)
 	//滤波完换算
      Press_Init();
 		
+		//处理上位机帧
+		U3_Modbus_Process();
+		
 		
 //  //输入角度在4到90°之间即可
-Motor_Control(g_target);//初始45°
-//		
-		
+   Motor_Control(g_target);//初始45°
 		
 		
 		
@@ -107,7 +108,12 @@ Motor_Control(g_target);//初始45°
 //     rt_thread_mdelay(100);	
 //     RS485_SendText(0x15);	
 //     rt_thread_mdelay(100);
-		
+       
+//	   RS485_SendTextU3(0x35); 
+//       rt_thread_mdelay(100); 
+//	   RS485_SendTextU3(0x25);
+//       rt_thread_mdelay(100); 
+//       RS485_SendTextU3(0x15); 	   
 //if (RxFlag() == 1)                          /* 中断通知：收到数据了 */
 //        {
 //			rt_thread_mdelay(30);

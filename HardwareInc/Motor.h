@@ -14,6 +14,8 @@ void MotorDirectionSet(uint8_t Dir);
 
 void Motor_Control(uint16_t TargetAngle);
 
+void Motor_Init(void);
+
 #define Motor_Dir_Stop               0
 #define Motor_Dir_CW                 1
 #define Motor_Dir_CCW                2

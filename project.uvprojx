@@ -340,7 +340,7 @@
               <MiscControls></MiscControls>
               <Define>STM32L496xx, USE_HAL_DRIVER</Define>
               <Undefine></Undefine>
-              <IncludePath>.;..\SDK\rt-thread\include;.;applications;..\SDK\rt-thread\libcpu\arm\common;..\SDK\rt-thread\libcpu\arm\cortex-m4;..\SDK\rt-thread\components\drivers\include;..\SDK\rt-thread\components\drivers\include;..\SDK\rt-thread\components\drivers\include;..\SDK\rt-thread\components\finsh;..\SDK\libraries\CMSIS\Device\ST\STM32L4xx\Include;..\SDK\libraries\CMSIS\Include;..\SDK\libraries\STM32L4xx_HAL_Driver\inc;..\SDK\drivers;.\UserSrc;.\UserInc;.\HardwareSrc;.\HardwareInc</IncludePath>
+              <IncludePath>.;..\SDK\rt-thread\include;.;applications;..\SDK\rt-thread\libcpu\arm\common;..\SDK\rt-thread\libcpu\arm\cortex-m4;..\SDK\rt-thread\components\drivers\include;..\SDK\rt-thread\components\drivers\include;..\SDK\rt-thread\components\drivers\include;..\SDK\rt-thread\components\finsh;..\SDK\libraries\CMSIS\Device\ST\STM32L4xx\Include;..\SDK\libraries\CMSIS\Include;..\SDK\libraries\STM32L4xx_HAL_Driver\inc;..\SDK\drivers;.\UserSrc;.\UserInc;.\HardwareSrc;.\HardwareInc;..\SDK\rt-thread\components\drivers\include\ipc</IncludePath>
             </VariousControls>
           </Cads>
           <Aads>

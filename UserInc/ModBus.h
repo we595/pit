@@ -10,8 +10,11 @@
 
 uint16_t CRC16_Modbus(volatile uint8_t *buf, uint16_t len);
 
+void U3_Modbus_Process(void);
 
 
+
+#define MODBUS_ADDR   2          /* MCU ¥”’æµÿ÷∑ */
 
 #endif
 

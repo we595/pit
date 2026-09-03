@@ -265,11 +265,70 @@ uint8_t  RxFlag(void)
 
 }	
 
+/****************************************************************************
+ * 函数名称:USART3_Init
+ * 功能    :用于上位机与mcu的通信
+ * 备注1    :PB10_TX_Usart3,PB11_RX_Usart3,查数据手册这俩io口复用AF7
+******************************************************************************/
+struct rt_ringbuffer usart3_rb;
+static uint8_t usart3_rb_buf[64];   /* 环形缓冲 64 字节 */
 
+static UART_HandleTypeDef USART3_Handle = {0};
+void Usart3_Init(void)
+{
+    __HAL_RCC_USART3_CLK_ENABLE();
+    __HAL_RCC_GPIOB_CLK_ENABLE();
 
+    GPIO_InitTypeDef GPIO_InitStructure = {0};
+    /* PB10 TX */
+    GPIO_InitStructure.Pin = GPIO_PIN_10;
+    GPIO_InitStructure.Pull = GPIO_NOPULL;
+    GPIO_InitStructure.Speed = GPIO_SPEED_FREQ_VERY_HIGH;
+    GPIO_InitStructure.Mode = GPIO_MODE_AF_PP;
+    GPIO_InitStructure.Alternate = GPIO_AF7_USART3;
+    HAL_GPIO_Init(GPIOB, &GPIO_InitStructure);
+    /* PB11 RX */
+    GPIO_InitStructure.Pin = GPIO_PIN_11;
+    GPIO_InitStructure.Pull = GPIO_PULLUP;
+    GPIO_InitStructure.Speed = GPIO_SPEED_FREQ_MEDIUM;
+    GPIO_InitStructure.Mode = GPIO_MODE_AF_PP;
+    GPIO_InitStructure.Alternate = GPIO_AF7_USART3;
+    HAL_GPIO_Init(GPIOB, &GPIO_InitStructure);
 
+    USART3_Handle.Instance = USART3;
+    USART3_Handle.Init.BaudRate = BAUD_RATE_9600;   /* 和上位机一致 */
+    USART3_Handle.Init.WordLength = UART_WORDLENGTH_8B;
+    USART3_Handle.Init.StopBits = UART_STOPBITS_1;
+    USART3_Handle.Init.Parity = UART_PARITY_NONE;
+    USART3_Handle.Init.Mode = UART_MODE_TX_RX;
+    USART3_Handle.Init.HwFlowCtl = UART_HWCONTROL_NONE;
+    USART3_Handle.Init.OverSampling = UART_OVERSAMPLING_8;
+    HAL_UART_Init(&USART3_Handle);
 
+    HAL_NVIC_SetPriority(USART3_IRQn, 3, 0);
+    HAL_NVIC_EnableIRQ(USART3_IRQn);
+    __HAL_UART_ENABLE_IT(&USART3_Handle, UART_IT_RXNE);
+	
+	  /* 环形缓冲初始化(只调一次, 别放中断!),将usart3_rb_buf[16]这个数组放到这个usart3_rb结构体内 */
+	rt_ringbuffer_init(&usart3_rb,usart3_rb_buf, sizeof(usart3_rb_buf)); 
+}
 
+/*************************************************************************** 
+ * 函数名称 : USART3_IRQHandler
+ * 功能描述 : 串口3中断服务函数,每接收一个字节就会进入一次中断
+ * 备注     :使用了环形缓冲区来接收来自上位机的数据
+***************************************************************************/
+
+void USART3_IRQHandler(void)
+{
+  if (__HAL_UART_GET_FLAG(&USART3_Handle, UART_FLAG_RXNE) != RESET)
+  {
+    uint8_t Data = (uint8_t)(USART3->RDR & 0xff);  /* 读取接收寄存器数据 */
+    rt_ringbuffer_putchar(&usart3_rb, Data);
+     tUsart3_RX.Tick = rt_tick_get();
+  }
+
+}
 
 /******************************************************************************************
 *函数名称：DMA_Init
@@ -339,8 +398,13 @@ void Init(void)
   Motor_Gpio_Init();	
   DAC_Init();
   ADC_Init();
-  DMA_Init();	
+  DMA_Init();
+
+ 
+	
   Usart2_Init();
+  Usart3_Init();
+	Motor_Init();	
 }
 
 

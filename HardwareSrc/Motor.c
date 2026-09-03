@@ -197,8 +197,12 @@ void Motor_Control(uint16_t TargetAngle)
 
    if (Temp > 1800)
     {
-        Temp = 3600 - Temp;
-        tAngleControl.Angle_Current_x10 = Temp;//考虑到绝对值编码器往0°转,不小心转过去变成大角度时候
+//        Temp = 3600 - Temp;
+//        tAngleControl.Angle_Current_x10 = Temp;//考虑到绝对值编码器往0°转,不小心转过去变成大角度时候
+	WasRunning = 1;                    /* 限位也在转, 标记 */
+     MotorDirectionSet(Motor_Dir_CCW);
+      MotorSpeedSet(45);
+      return;
     }
 
    if (tAngleControl.Angle_Current_x10 < OPEN_LIMIT_X10)
@@ -290,8 +294,27 @@ static void Motor_ControlCmd(int WordNum , char *Word[])
 //命令行
 MSH_CMD_EXPORT_ALIAS(Motor_ControlCmd ,MotorControl ,"Input: MotorControl<3--94>");
 
+/*****************************************************************************************************
+*函数名称;Motor_Init
+*功能:上电先把当前角度传感器的角度初始化为目标角度
 
+*******************************************************************************************************/
+void Motor_Init(void)
+{
+	/* 1. 发读角度命令, 等应答 */
+    RS485Send_ReadSingleRingOrder();
+    rt_thread_mdelay(50);
+    RS485Recive_SingleRingValue();
 
+  //打印角度值
+        rt_kprintf("Angle = %u.%u \n",
+               tAngleControl.Angle_Current_x10/ 10, tAngleControl.Angle_Current_x10 % 10);
+
+	g_target = tAngleControl.Angle_Current_x10/10;
+	//打印当前目标角度值
+	 rt_kprintf("Motor_Init: target = %u deg (不动)\n", g_target);
+	 	 
+}
 
 
 

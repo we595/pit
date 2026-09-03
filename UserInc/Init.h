@@ -5,7 +5,7 @@
 #include <stdlib.h>
 #include <finsh.h>
 #include <rtthread.h>
-
+#include <ringbuffer.h>
 
 void Init(void);
 void DAC_SetValue(float VoltageIn);
@@ -13,6 +13,7 @@ void DAC_SetValue(float VoltageIn);
 uint8_t  RxFlag(void);
 uint8_t  ADCFlag(void);
 
+extern struct rt_ringbuffer usart3_rb;
 
 #endif
 
