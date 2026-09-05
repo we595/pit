@@ -56,9 +56,9 @@ void ADC_ZeroAdjust(void)
 	  tDMA.ADC_NumIN3++;
      tDMA.ADC_Sum32_IN3 += tDMA.ADC_DR_IN3;
 	   
-	 if(tDMA.ADC_NumIN3 >= 1024)
+	 if(tDMA.ADC_NumIN3 >= 256)
 	 {
-	   tDMA.ADC_ZeroIN3 = tDMA.ADC_Sum32_IN3 >> 10;
+	   tDMA.ADC_ZeroIN3 = tDMA.ADC_Sum32_IN3 >> 8;
 	    
 		 tDMA.ADC_NumIN3 = 0;
 		 tDMA.ADC_Sum32_IN3 = 0;
@@ -71,19 +71,19 @@ void ADC_ZeroAdjust(void)
       tDMA.ADC_NumIN13++;
      tDMA.ADC_Sum32_IN13 += tDMA.ADC_DR_IN13;
 	   
-	 if(tDMA.ADC_NumIN13 >= 1024)
+	 if(tDMA.ADC_NumIN13 >= 256)
 	 {
-	   tDMA.ADC_ZeroIN13 = tDMA.ADC_Sum32_IN13 >> 10;
+	   tDMA.ADC_ZeroIN13 = tDMA.ADC_Sum32_IN13 >> 8;
 	    
 		 tDMA.ADC_NumIN13 = 0;
 		 tDMA.ADC_Sum32_IN13 = 0;
+		 tDMA.ADC_ZeroDone = 1;
 	 }
 	 tDMA.ADC_Index = 2;
    
    }
    else{
-    tDMA.ADC_ZeroDone = 1;
-   
+	   tDMA.ADC_Index = 0;
    }
 }
 

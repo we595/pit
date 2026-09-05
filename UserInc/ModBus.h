@@ -14,7 +14,7 @@ void U3_Modbus_Process(void);
 
 
 
-#define MODBUS_ADDR   2          /* MCU ¥”’æµÿ÷∑ */
+#define MODBUS_ADDR   1          /* MCU ????(???????? 01) */
 
 #endif
 

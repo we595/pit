@@ -29,7 +29,7 @@
 #define LED_PIN             PIN_LED_R
 
 
-uint16_t g_target = 45;
+uint16_t g_target = 4;
 int main(void)
 {
 	Init();
@@ -85,8 +85,8 @@ int main(void)
 		U3_Modbus_Process();
 		
 		
-//  //输入角度在4到90°之间即可
-   Motor_Control(g_target);//初始45°
+//  //输入角度在4到90°之间即可,当滤波完毕在启动闭环
+   if (tDMA.ADC_ZeroDone) Motor_Control(g_target);//初始45°
 		
 		
 		

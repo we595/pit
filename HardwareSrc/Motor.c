@@ -13,7 +13,7 @@
 
 /*********************************±Õ»·²ÎÊý********************* */
 #define OPEN_LIMIT_X10   20     /* 2.0¡ã */
-#define CLOSE_LIMIT_X10  950    /* 95.0¡ã */
+#define CLOSE_LIMIT_X10  970    /* 95.0¡ã */
 #define DEADBAND_X10     5      /* 0.5¡ã */
 #define MAX_SPEED        60
 #define MIN_SPEED        50
