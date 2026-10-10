@@ -29,13 +29,12 @@
 #define LED_PIN             PIN_LED_R
 
 
-uint16_t g_target = 4;
+uint16_t g_target = 40;
 int main(void)
 {
 	Init();
 	
-	//0顺时针角度递增,1逆时针角度递增
-	 RS485Send_DirectionSetOrder(0);
+	/* 上电方向设置已挪进 RS485 服务线程(RS485_ServiceInit 内部), 这里不再直接发 U2 */
 
     /* 初始化 LED 引脚为输出模式 */
     rt_pin_mode(LED_PIN, PIN_MODE_OUTPUT);
@@ -71,22 +70,20 @@ int main(void)
 		
    rt_thread_mdelay(10);//给个延时使系统让出
 		
-    //先校准0点
-   ADC_ZeroAdjust();		
-	
-		
-	//滤波调用	
+//滤波调用	
 	ADC_Filter();
 		
 	//滤波完换算
      Press_Init();
 		
 		//处理上位机帧
-		U3_Modbus_Process();
+	U3_Modbus_Process();
 		
 		
-//  //输入角度在4到90°之间即可,当滤波完毕在启动闭环
-   if (tDMA.ADC_ZeroDone) Motor_Control(g_target);//初始45°
+  //输入角度在3到95°之间即可
+  //上电不乱转: Motor_Init已把 g_target=当前角度; 读不到角度时 Motor_Control 会自动停电机
+  //★ 标定完成(2026-10-10), 闭环恢复启用; 阀门量程/功率配置切换: msh ValveCfg Big|Small
+	Motor_Control(g_target);
 		
 		
 		

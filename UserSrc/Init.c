@@ -1,6 +1,7 @@
 #include "init.h"
 #include "motor.h"
 #include "define.h"
+#include "RS485.h"    /* RS485_ServiceInit: 启动485服务线程 */
 
 
 /******************************************************************** 
@@ -404,7 +405,9 @@ void Init(void)
 	
   Usart2_Init();
   Usart3_Init();
-	Motor_Init();	
+  Motor_Init();	    /* ① 上电的编码器总线操作先做完(此时服务线程未启动, 无竞争) */
+
+  RS485_ServiceInit();  /* ② 启动 RS485 服务线程: 从此由它独占 USART2 */	
 }
 
 

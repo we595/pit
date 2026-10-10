@@ -45,13 +45,26 @@ void U3_Modbus_Process(void)
         rt_ringbuffer_data_len(&usart3_rb) < 8 &&
         (rt_tick_get() - (uint32_t)tUsart3_RX.Tick) >= rt_tick_from_millisecond(50))
     {
-        rt_ringbuffer_reset(&usart3_rb);
+        /* 【原始报文监控】残帧也打出来, 看一眼收到的是什么(诊断用) */
+        uint8_t n = (uint8_t)rt_ringbuffer_data_len(&usart3_rb);
+        uint8_t b;
+        rt_kprintf("[RX?] ");
+        for (uint8_t i = 0; i < n; i++)
+        {
+            rt_ringbuffer_getchar(&usart3_rb, &b);
+            rt_kprintf("%02X ", b);
+        }
+        rt_kprintf("(frame len=%u)\n", n);
     }
 
     /* ② 攒够 8 字节 = 完整一帧, 立刻取走解析。一帧一帧来, 绝不取空混帧 */
     while (rt_ringbuffer_data_len(&usart3_rb) >= 8)
     {
         rt_ringbuffer_get(&usart3_rb, frame, 8);   /* 一次取 8 字节,并且将环形缓冲区字节放到frame里 */
+        /* 【原始报文监控】上位机发来什么就显示什么(dump在解析前, CRC错的也看得到) */
+        rt_kprintf("[RX] %02X %02X %02X %02X %02X %02X %02X %02X\n",
+                   frame[0], frame[1], frame[2], frame[3],
+                   frame[4], frame[5], frame[6], frame[7]);
         Modbus_Slave_Process(frame, 8);
     }
 }
@@ -124,19 +137,29 @@ static void Modbus_Slave_Process(uint8_t *rx, uint8_t len)
         switch (reg)
         {
         case 9:                                   /* 40010 -- 00 09 目标开度(度) */
-            if (val < 3)  val = 3;
-            if (val > 95) val = 95;
+            if (val < g_valve_cfg.tgt_min_deg) val = g_valve_cfg.tgt_min_deg;
+            if (val > g_valve_cfg.tgt_max_deg) val = g_valve_cfg.tgt_max_deg;
             g_target = (uint16_t)val;
+            rt_kprintf("[MB] Write Target: %u deg\n", g_target);   /* putty 监控: 上位机写目标开度 */
             break;
         case 1:                                   /* 40002 -- 00 01 开/关阀命令(上位机协议): 1开阀 2关阀 */
         case 10:                                  /* 40011--00 0a 命令: 0停 1开阀 2关阀 */
             if (val <= 3) s_ValveState = val;     /* 记录阀门状态, 供读当前数据(40011)回传 */
-            if      (val == 1) g_target = 3;      /* 开阀→全开 */
-            else if (val == 2) g_target = 95;     /* 关阀→全关 */
+            if      (val == 1)                    /* 开阀→全开(按当前阀门配置) */
+            {
+                g_target = g_valve_cfg.tgt_min_deg;
+                rt_kprintf("[MB] Write OPEN  valve: target = %u deg\n", g_target);
+            }
+            else if (val == 2)                    /* 关阀→全关(按当前阀门配置) */
+            {
+                g_target = g_valve_cfg.tgt_max_deg;
+                rt_kprintf("[MB] Write CLOSE valve: target = %u deg\n", g_target);
+            }
 		    else if (val == 0)
     {
         MotorDirectionSet(Motor_Dir_Stop);   /* 立即拉低两方向线 */
         MotorSpeedSet(0);                    /* DAC 归零         */
+        rt_kprintf("[MB] Write STOP  valve\n");   /* putty 监控: 上位机发停止 */
 //        /* 再把目标改成当前位置, 防止闭环下一轮重启 */
 //        uint32_t cur = tAngleControl.Angle_Current_x10;
 //        if (cur > 1800) cur = 3600 - cur;

@@ -114,9 +114,29 @@ typedef struct
    int32_t Angle_Error;	
 	
    int16_t Angle_DeadEnd;	
+  
+   uint32_t Angle_Tick;     /* 最近一次成功解析角度的 tick(供 Read 命令判断缓存新鲜度) */	
 }tAngleControl_Type;
 extern volatile tAngleControl_Type tAngleControl;
 
+
+
+/*********************************RS485消息队列枚举变量以及结构体******************************************/
+typedef enum
+{
+    RS485_OP_NONE   = 0,
+    RS485_OP_READ   = 1,      /* (可选) 立即读一次角度 */
+    RS485_OP_SETVAL = 2,      /* 设置当前值, 参数放 val: raw 0~4095 */
+    RS485_OP_RESET  = 3,      /* 复位零点, 无参数 */
+    RS485_OP_DIRSET = 4,      /* 设递增方向, 参数放 val: 0=CW / 1=CCW */
+} T_rs485_op;
+
+typedef struct
+{
+    T_rs485_op op;            /* 要做什么: 命令码 */
+    uint16_t   val;           /* 参数: 对应用上面注释的含义 */
+    /* 以后需要"等结果"时再加:  rt_sem_t done; */
+} T_rs485_msg;
 
 #endif
 

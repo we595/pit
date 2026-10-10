@@ -17,4 +17,10 @@ volatile    tLife_Type tLife;
 
 volatile tUsart3_RX_Type tUsart3_RX;
 
- volatile tUsart3_TX_Type tUsart3_TX;
+volatile tUsart3_TX_Type tUsart3_TX;
+ 
+
+ 
+ 
+
+

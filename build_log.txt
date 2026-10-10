@@ -1,8 +1,8 @@
 *** Using Compiler 'V5.06 update 5 (build 528)', folder: 'E:\keil c51\ARM\ARMCC\Bin'
 Build target 'JingXiaxianmu'
-compiling main.c...
+compiling Pressure.c...
 linking...
-Program Size: Code=41612 RO-data=7368 RW-data=828 ZI-data=2908  
+Program Size: Code=64630 RO-data=9462 RW-data=872 ZI-data=3696  
 After Build - User command #1: fromelf --bin .\build\JingXiaxianmu.axf --output JingXiaxianmu.bin
 ".\build\JingXiaxianmu.axf" - 0 Error(s), 0 Warning(s).
 Build Time Elapsed:  00:00:02

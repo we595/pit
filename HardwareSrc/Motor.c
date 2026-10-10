@@ -11,12 +11,34 @@
 #include "Pressure.h"
 
 
-/*********************************闭环参数********************* */
-#define OPEN_LIMIT_X10   20     /* 2.0° */
-#define CLOSE_LIMIT_X10  970    /* 95.0° */
-#define DEADBAND_X10     5      /* 0.5° */
+/*********************************闭环参数(原配置, 保留)********************* */
+#define OPEN_LIMIT_X10   20     /* 3.0°  (开极限: <3.0° 强制回关) */
+#define CLOSE_LIMIT_X10  1000    /* 96.0° (关极限: >96° 强制回开; 全关目标95°留1°余量) */
+#define DEADBAND_X10     10      /* 死区(0.1°): 到位判断阈值, 10=1.0° (已接入 Motor_Control) */
+#define INPOS_RELEASE_X10 10     /* 迟滞释放余量(0.1°): 到位后误差须超过 死区+此值 才重新驱动, 防回弹反复启停 */
 #define MAX_SPEED        60
 #define MIN_SPEED        50
+
+/******************************阀门配置表(量程/功率, 可切换)****************************
+ * Big   = 原阀门 : 工作 3~95°,  极限 3.0/96.0°,  速度 60/45
+ * Small = 小阀   : 工作 4~100°, 极限 4.0/100.0°, 信号最大 40
+ * 切换: msh 命令 ValveCfg Big|Small (运行时立即生效, 不存Flash)
+ * 开机默认: VALVE_CFG_DEFAULT  0=Big原阀  1=Small小阀
+ ****************************************************************************************/
+#define VALVE_CFG_DEFAULT   1               /* 开机默认: 1=小阀(当前) */
+
+static const tValveCfg_Type cfg_big   = { OPEN_LIMIT_X10, CLOSE_LIMIT_X10, 3,  95,  MAX_SPEED, 45 };
+static const tValveCfg_Type cfg_small = { 40,             1050,            4,  105, 40,        40 };
+/* 小阀当前: 目标钳位 4~105°(tgt_max已从100放开到105), 关侧极限105.0° */
+
+static uint8_t g_cfg_sel = VALVE_CFG_DEFAULT;   /* 0=Big, 1=Small */
+tValveCfg_Type g_valve_cfg;                     /* 当前生效配置(Valve_CfgApply 填充) */
+
+/* 把选中的配置拷贝到 g_valve_cfg */
+static void Valve_CfgApply(void)
+{
+    g_valve_cfg = (g_cfg_sel == 0) ? cfg_big : cfg_small;
+}
 
 
 
@@ -57,7 +79,7 @@ void Motor_Gpio_Init(void)
 *功能    ：设置电机方向
 *形参    ：外部给函数传来方向指令，函数内部做出方向判断
 *******************************************************************************************/
-void MotorDirectionSet(uint8_t Dir)
+ void MotorDirectionSet(uint8_t Dir)
 {
     static uint8_t LastDir = 0xFF;   /* 记住上次方向, 0xFF=初始未设 */
 
@@ -67,7 +89,7 @@ void MotorDirectionSet(uint8_t Dir)
     /* 方向真的变了才拉低等待(换向) */
     rt_pin_write(Motor_Pin_CW, PIN_LOW);
     rt_pin_write(Motor_Pin_CCW, PIN_LOW);
-    rt_thread_mdelay(500);
+    rt_thread_mdelay(200);
 
     /* 方向选择 */
     if (Dir == Motor_Dir_CW)
@@ -179,18 +201,47 @@ MSH_CMD_EXPORT_ALIAS(Motor_Cmd ,Motor ,"Input: Motor (CW|CCW|STOP) Speed<0-100>"
  *********************************************************/
 void Motor_Control(uint16_t TargetAngle)
 {
-	static uint8_t WasRunning;
+	static uint8_t  WasRunning;
+	static uint8_t  LastWarned  = 0;   /* 缓存过期警告只打一次 */
+	static uint8_t  InPosition  = 0;   /* 到位锁定(迟滞): 防机构回弹/打滑引起反复启停 */
+	static uint16_t LastTargetDeg = 0xFFFF;  /* 记住上次目标, 变化时解除锁定 */
+	static uint8_t  StuckLatched = 0;        /* 老化/卡滞故障锁定: 停机等待, 改目标后自动解除 */
 	
-   tAngleControl.Angle_DeadEnd =5; //死区5,0.5°，在死区内不再控制电机转动
+   /*0.目标值钳位到当前阀门配置的安全区间, 防 g_target=0 之类异常值 */
+   if (TargetAngle < g_valve_cfg.tgt_min_deg)  TargetAngle = g_valve_cfg.tgt_min_deg;
+   if (TargetAngle > g_valve_cfg.tgt_max_deg) TargetAngle = g_valve_cfg.tgt_max_deg;
+
+   /* 目标变化(含上电首次) → 解除到位/卡滞锁定 + 清运行峰值, 保证改目标后重新动作 */
+   if (TargetAngle != LastTargetDeg)
+   {
+       LastTargetDeg = TargetAngle;
+       InPosition   = 0;
+       StuckLatched = 0;
+       Pressure_RunPeakClear();
+   }
+	
+   tAngleControl.Angle_DeadEnd = DEADBAND_X10; //死区=DEADBAND_X10(0.1°单位), 在死区内不再控制电机转动
    tAngleControl.Angle_Target_x10 = TargetAngle * 10;
 
  
 
-   /*1.读下当前角度值并且记录到结构体内*/
-   RS485Send_ReadSingleRingOrder();   /* 1. 发读单圈命令,并将角度记录 */
-   rt_thread_mdelay(50);              /* 2. 等应答（传感器14ms应答+收完）*/
-   RS485Recive_SingleRingValue();     /* 3. 解析 + CRC */
-   
+   /*1. 角度不在这里读了: RS485 服务线程周期读角度并刷新缓存,
+    *   主循环只读 tAngleControl 缓存(不碰485总线);
+    *   缓存超过500ms没更新 = 编码器读不到 → 停电机, 不能用旧角度瞎控 */
+   if (rt_tick_get() - tAngleControl.Angle_Tick > rt_tick_from_millisecond(500))
+   {
+       if (LastWarned == 0)
+       {
+           rt_kprintf("[Motor] angle cache stale, motor STOP\n");
+           LastWarned = 1;
+       }
+       WasRunning = 0;
+       MotorDirectionSet(Motor_Dir_Stop);
+       MotorSpeedSet(0);
+       return;
+   }
+   LastWarned = 0;
+
    //读完再取角度
    uint32_t Temp = tAngleControl.Angle_Current_x10;
    /*2.限位保护 */
@@ -201,23 +252,23 @@ void Motor_Control(uint16_t TargetAngle)
 //        tAngleControl.Angle_Current_x10 = Temp;//考虑到绝对值编码器往0°转,不小心转过去变成大角度时候
 	WasRunning = 1;                    /* 限位也在转, 标记 */
      MotorDirectionSet(Motor_Dir_CCW);
-      MotorSpeedSet(45);
+      MotorSpeedSet(g_valve_cfg.lim_spd);
       return;
     }
 
-   if (tAngleControl.Angle_Current_x10 < OPEN_LIMIT_X10)
+   if (tAngleControl.Angle_Current_x10 < g_valve_cfg.open_lim_x10)
    {
      WasRunning = 1;                    /* 限位也在转, 标记 */
      MotorDirectionSet(Motor_Dir_CCW);
-      MotorSpeedSet(45);
+      MotorSpeedSet(g_valve_cfg.lim_spd);
       return;
       
    }
-   else if (tAngleControl.Angle_Current_x10 > CLOSE_LIMIT_X10)
+   else if (tAngleControl.Angle_Current_x10 > g_valve_cfg.close_lim_x10)
    {
       WasRunning = 1;                   /* 限位也在转, 标记 */
       MotorDirectionSet(Motor_Dir_CW);
-      MotorSpeedSet(45);
+      MotorSpeedSet(g_valve_cfg.lim_spd);
       return;
 
    }
@@ -226,40 +277,82 @@ void Motor_Control(uint16_t TargetAngle)
    int32_t Error = tAngleControl.Angle_Target_x10 - tAngleControl.Angle_Current_x10;
    tAngleControl.Angle_Error = Error;
 
-    /*4.判断误差是否在死区内*/
-    if (Error > tAngleControl.Angle_DeadEnd)
+   /*3.5 老化/卡滞故障已锁定: 保持停机等待(改目标后自动解除, 重新尝试) */
+   if (StuckLatched)
+   {
+       MotorDirectionSet(Motor_Dir_Stop);
+       MotorSpeedSet(0);
+       return;
+   }
+
+    /*4.误差判断: 未到位用死区驱动; 到位后加迟滞(误差超 死区+INPOS_RELEASE_X10 才重新驱动),
+     *  防止棘轮/液压机构停泵回弹(约一个齿)造成 "到位→滑出→再驱动" 反复跳 */
     {
-      MotorDirectionSet(Motor_Dir_CCW);
-        MotorSpeedSet(60);
-       WasRunning = 1;
-    }
-    else if (Error < -tAngleControl.Angle_DeadEnd)
-    {
-      MotorDirectionSet(Motor_Dir_CW);
-        MotorSpeedSet(60);
-        WasRunning = 1;
-    }
-    else
-    {
-		//转到角度检测一次压力值
-		if(WasRunning == 1)
-		{
-		
-		Pressure_LifeCheck(tPressure.Pressure1_IN3, tPressure.Pressure2_IN13);
-		WasRunning = 0;
-		//转到角度,打印角度值
-        rt_kprintf("Angle = %u.%u \n",
-        tAngleControl.Angle_Current_x10  / 10,  tAngleControl.Angle_Current_x10  % 10);	 
-	//转到角度,打印压力值
-		rt_kprintf("P1 = %u.%02u MPa  P2 = %u.%02u MPa\n",
-               tPressure.Pressure1_IN3 / 100, tPressure.Pressure1_IN3 % 100,
-               tPressure.Pressure2_IN13 / 100, tPressure.Pressure2_IN13 % 100);
-		}
-		
-    		
-      MotorDirectionSet(Motor_Dir_Stop);
-        MotorSpeedSet(0);
-		
+        int32_t Threshold = tAngleControl.Angle_DeadEnd + (InPosition ? INPOS_RELEASE_X10 : 0);
+
+        if (Error > Threshold)
+        {
+            if (InPosition)   /* 到位后又被拉开: 打印一行, 便于观察回弹/打滑幅度 */
+                rt_kprintf("[Motor] re-drive: cur=%u.%u err=%d\n",
+                           tAngleControl.Angle_Current_x10 / 10,
+                           tAngleControl.Angle_Current_x10 % 10, (int)Error);
+            InPosition = 0;
+            MotorDirectionSet(Motor_Dir_CCW);
+            MotorSpeedSet(g_valve_cfg.drive_spd);
+            WasRunning = 1;
+            /* 老化/卡滞检测: 正在驱动(未到位)但压力已≥130%标称 → 故障: 停机并锁定 */
+            if (Pressure_StuckCheck())
+            {
+                StuckLatched = 1;
+                WasRunning = 0;
+                MotorDirectionSet(Motor_Dir_Stop);
+                MotorSpeedSet(0);
+            }
+        }
+        else if (Error < -Threshold)
+        {
+            if (InPosition)   /* 到位后又被拉开: 打印一行, 便于观察回弹/打滑幅度 */
+                rt_kprintf("[Motor] re-drive: cur=%u.%u err=%d\n",
+                           tAngleControl.Angle_Current_x10 / 10,
+                           tAngleControl.Angle_Current_x10 % 10, (int)Error);
+            InPosition = 0;
+            MotorDirectionSet(Motor_Dir_CW);
+            MotorSpeedSet(g_valve_cfg.drive_spd);
+            WasRunning = 1;
+            /* 老化/卡滞检测: 正在驱动(未到位)但压力已≥130%标称 → 故障: 停机并锁定 */
+            if (Pressure_StuckCheck())
+            {
+                StuckLatched = 1;
+                WasRunning = 0;
+                MotorDirectionSet(Motor_Dir_Stop);
+                MotorSpeedSet(0);
+            }
+        }
+        else
+        {
+            /* 在死区(或迟滞带)内: 到位保持 */
+            if (WasRunning == 1)
+            {
+                WasRunning = 0;
+                rt_kprintf("Angle = %u.%u \n",
+                tAngleControl.Angle_Current_x10  / 10,  tAngleControl.Angle_Current_x10  % 10);
+
+                /* 寿命评估: 只有"全行程到位"(开到开极限/关到关极限2°内)才评估;
+                 * 压力只在电机顶着极限运行期间存在, 停机即消失 → 用运行期间峰值 */
+                if (tAngleControl.Angle_Current_x10 <= (uint32_t)(g_valve_cfg.open_lim_x10 + 20) ||
+                    tAngleControl.Angle_Current_x10 >= (uint32_t)(g_valve_cfg.close_lim_x10 - 20))
+                {
+                    uint16_t pk1 = 0, pk2 = 0;
+                    Pressure_LifeCheck();
+                    Pressure_GetLastPeak(&pk1, &pk2);
+                    rt_kprintf("P1peak = %u.%02u MPa  P2peak = %u.%02u MPa\n",
+                               pk1 / 100, pk1 % 100, pk2 / 100, pk2 % 100);
+                }
+            }
+            InPosition = 1;
+            MotorDirectionSet(Motor_Dir_Stop);
+            MotorSpeedSet(0);
+        }
     }
    
    
@@ -275,24 +368,57 @@ static void Motor_ControlCmd(int WordNum , char *Word[])
 	
    if (WordNum != 2)
    {
-       rt_kprintf("Input: MotorControl <3--94> ");
+       rt_kprintf("Input: MotorControl <%u--%u> ", g_valve_cfg.tgt_min_deg, g_valve_cfg.tgt_max_deg);
    
 	   return;
    }
   
 	Temp = atoi(Word[1]);
-    if (Temp < 4)  Temp = 4;                   /* 范围限制 */
-    if (Temp > 94) Temp = 94;
-    
+    if (Temp < g_valve_cfg.tgt_min_deg)  Temp = g_valve_cfg.tgt_min_deg;   /* 按当前阀门配置限制 */
+    if (Temp > g_valve_cfg.tgt_max_deg) Temp = g_valve_cfg.tgt_max_deg;
    g_target= Temp;
         
-    Motor_Control(g_target);
+    /* 不再从 shell 线程直接驱动电机: 只改目标, 由主循环 Motor_Control 执行 */
  rt_kprintf("Target = %u deg\n", g_target);   
 
 }
 
 //命令行
-MSH_CMD_EXPORT_ALIAS(Motor_ControlCmd ,MotorControl ,"Input: MotorControl<3--94>");
+MSH_CMD_EXPORT_ALIAS(Motor_ControlCmd ,MotorControl ,"MotorControl <deg> set target");
+
+
+/********************************阀门配置切换命令*****************************************/
+static void Valve_CfgCmd(int WordNum, char *Word[])
+{
+    if (WordNum < 2)
+    {
+        rt_kprintf("Input: ValveCfg Big|Small   (now=%s: %u~%u deg, lim %u.%u/%u.%u, spd %u/%u)\n",
+                   (g_cfg_sel == 0) ? "Big" : "Small",
+                   g_valve_cfg.tgt_min_deg, g_valve_cfg.tgt_max_deg,
+                   g_valve_cfg.open_lim_x10 / 10,  g_valve_cfg.open_lim_x10 % 10,
+                   g_valve_cfg.close_lim_x10 / 10, g_valve_cfg.close_lim_x10 % 10,
+                   g_valve_cfg.drive_spd, g_valve_cfg.lim_spd);
+        return;
+    }
+
+    if      (rt_strcasecmp(Word[1], "Big") == 0)    g_cfg_sel = 0;
+    else if (rt_strcasecmp(Word[1], "Small") == 0)  g_cfg_sel = 1;
+    else
+    {
+        rt_kprintf("Input Err, Please Input: ValveCfg Big|Small\n");
+        return;
+    }
+
+    Valve_CfgApply();
+    rt_kprintf("[Cfg] %s: %u~%u deg, lim %u.%u/%u.%u, spd drive=%u lim=%u\n",
+               (g_cfg_sel == 0) ? "Big" : "Small",
+               g_valve_cfg.tgt_min_deg, g_valve_cfg.tgt_max_deg,
+               g_valve_cfg.open_lim_x10 / 10,  g_valve_cfg.open_lim_x10 % 10,
+               g_valve_cfg.close_lim_x10 / 10, g_valve_cfg.close_lim_x10 % 10,
+               g_valve_cfg.drive_spd, g_valve_cfg.lim_spd);
+}
+MSH_CMD_EXPORT_ALIAS(Valve_CfgCmd ,ValveCfg ,"ValveCfg Big|Small switch valve config");
+
 
 /*****************************************************************************************************
 *函数名称;Motor_Init
@@ -301,19 +427,43 @@ MSH_CMD_EXPORT_ALIAS(Motor_ControlCmd ,MotorControl ,"Input: MotorControl<3--94>
 *******************************************************************************************************/
 void Motor_Init(void)
 {
-	/* 1. 发读角度命令, 等应答 */
-    RS485Send_ReadSingleRingOrder();
+    uint8_t ok = 0;
+
+    Valve_CfgApply();   /* 上电装载默认阀门配置(运行时可 msh ValveCfg Big|Small 切换) */
+
+    /* 0. 上电瞬间编码器可能还没完成初始化: 方向命令补发一次(0=CW递增) */
+    RS485Send_DirectionSetOrder(0);
     rt_thread_mdelay(50);
-    RS485Recive_SingleRingValue();
 
-  //打印角度值
-        rt_kprintf("Angle = %u.%u \n",
-               tAngleControl.Angle_Current_x10/ 10, tAngleControl.Angle_Current_x10 % 10);
+    /* 1. 重试读角度: 编码器上电慢, 一次读不到不代表坏了 */
+    for (uint8_t i = 0; i < 5; i++)
+    {
+        RS485Send_ReadSingleRingOrder();
+        rt_thread_mdelay(50);
+        if (RS485Recive_SingleRingValue())
+        {
+            ok = 1;
+            break;
+        }
+    }
 
-	g_target = tAngleControl.Angle_Current_x10/10;
-	//打印当前目标角度值
-	 rt_kprintf("Motor_Init: target = %u deg (不动)\n", g_target);
-	 	 
+    if (ok)
+    {
+        /* 2. 目标=当前角度 → 上电不动; 钳位到当前阀门配置区间 */
+        g_target = tAngleControl.Angle_Current_x10 / 10;
+        if (g_target < g_valve_cfg.tgt_min_deg)  g_target = g_valve_cfg.tgt_min_deg;
+        if (g_target > g_valve_cfg.tgt_max_deg) g_target = g_valve_cfg.tgt_max_deg;
+
+        rt_kprintf("Motor_Init: angle = %u.%u, target = %u deg (hold)\n",
+                   tAngleControl.Angle_Current_x10 / 10,
+                   tAngleControl.Angle_Current_x10 % 10, g_target);
+    }
+    else
+    {
+        /* 3. 编码器完全没响应: 目标给45°, 闭环里连续读失败会自动停电机 */
+        g_target = 45;
+        rt_kprintf("Motor_Init: angle read FAIL, target = 45 deg\n");
+    }
 }
 
 

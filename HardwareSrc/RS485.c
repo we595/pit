@@ -9,6 +9,25 @@
 #include "init.h"
 #include "Modbus.h"
 
+/* ★纪律(USART2=编码器总线):
+ *   1. 本文件的 RS485Send_* / RS485Recive_* / RS485_SendText 只允许 rs485_thread_entry 调用;
+ *   2. 其他线程要发命令 → RS485_Post(); 要读角度 → 读 tAngleControl 缓存;
+ *   3. 开机初始化(Motor_Init 等)必须在 RS485_ServiceInit() 之前完成. */
+
+#define RS485_MQ_NUM        8
+#define RS485_THREAD_STACK  1024        /* 跑一段时间后用 list_thread 看实际用量再调 */
+#define RS485_THREAD_PRIO   9           /* 必须高于主线程(10): 发帧期间不能被主循环抢占,
+                                           否则帧内字节间隙>1.5字符时间, Modbus 帧会被从站丢弃 */
+#define RS485_THREAD_TICK   10
+
+static struct rt_messagequeue g_mq;          /* ① 调度室: 控制块 */
+/* 每槽实际开销 = 对齐后消息大小 + 4字节链表节点, 多留4字节最保险 */
+static rt_uint8_t g_mq_pool[RS485_MQ_NUM * (sizeof(T_rs485_msg) + 4)];/* ② 仓库: 真正存数据 */
+
+
+
+
+
 /******************************************************************************* 
  * 函数名称:RS485_Send
  * 功能   :从机mcu的数据发送出去
@@ -74,7 +93,7 @@ void RS485Send_ReadSingleRingOrder(void)
 *备注    :从站(编码器)回传过来的数据除了crc校验的俩字节是按小端发过来的其余是大端
 因此在拼接数据时候不要搞错
 ********************************************************************************************/
-void RS485Recive_SingleRingValue(void)
+uint8_t RS485Recive_SingleRingValue(void)
 {
 
   if (tUsart2_RX.Index >= 7)
@@ -90,17 +109,13 @@ void RS485Recive_SingleRingValue(void)
        uint32_t Angle = (uint32_t) raw * 3600UL / 4096UL; 
     //拼接完角度后将角度存进控制结构体内部
        tAngleControl.Angle_Current_x10 = Angle;
-
-       //打印角度值
-//        rt_kprintf("Angle = %u.%u deg (raw=%u)\n",
-//               Angle / 10, Angle % 10, raw);	 
-	 
+       tAngleControl.Angle_Tick = rt_tick_get();   /* 记录更新时间, 供 Read 命令读缓存 */
+	   
+	   return 1;                      /* 成功 */
 	 }
-      else
-	  {
-	     rt_kprintf("CRC err\n");
-	  
-	  }		  
+
+      /* 失败: 不打印(主循环每60ms调用一次会刷屏), 由调用方计数处理 */
+      return 0;		  
 	  
   
   }
@@ -108,7 +123,7 @@ void RS485Recive_SingleRingValue(void)
   else
   {
   
-    rt_kprintf("NO Response the(Len = %d)\n" ,tUsart2_RX.Index );
+    return 0;   /* 无应答 */
   
   }
 
@@ -157,22 +172,12 @@ static void RS485Send_ResetZeroAdjust(int WordNum ,char *Word[])
          if(rt_strcasecmp(Word[1],"reset") == 0)
 	   {
 		
-	 RS485Send_ResetZeroOrder();
-     rt_thread_mdelay(50); 
-     RS485Recive_ResetZeroOrderCheck();
-     rt_thread_mdelay(50);   
-		   
-     RS485Send_ReadSingleRingOrder();   /* 1. 发读单圈命令 */
-    rt_thread_mdelay(50);              /* 2. 等应答（传感器14ms应答+收完）*/
-    RS485Recive_SingleRingValue();     /* 3. 解析 + CRC 校验+存值到结构体  */
-		   
- //打印角度值,用结构体的值
-        rt_kprintf("Angle = %u.%u \n",
-        tAngleControl.Angle_Current_x10  / 10,  tAngleControl.Angle_Current_x10  % 10);	 
-	 
-	 	
-      
-	rt_kprintf("Sensor Reset OK \n" )	;	
+		/* 只投递命令, 执行/校验/读回由 RS485 服务线程负责(见 rs485_thread_entry) */
+		if (RS485_Post(RS485_OP_RESET, 0) == RT_EOK)
+			rt_kprintf("Sensor Reset queued (exec by rs485 thread)\n");
+		else
+			rt_kprintf("rs485 busy, try again\n");
+		/* 结果由 rs485 服务线程打印: "Reset Zero Order OK/CRC err" + "[485] Angle = .." */
 	  }	
 	else if(rt_strcasecmp(Word[1],"reset")!= 0)
 	  {
@@ -323,18 +328,11 @@ static void RS485Send_SetValueAdjust(int WordNum, char *Word[])
     uint16_t Raw = (uint16_t)(((uint32_t)TempDeg * 1024) / 90);
     if (Raw > 4095) Raw = 4095;
 
-    rt_kprintf("Set %u deg -> raw %u\n", TempDeg, Raw);
-
-    RS485Send_SetValueOrder(Raw);        /* 1. 发设置当前值命令 */
-    rt_thread_mdelay(50);                /* 2. 等应答 */
-    RS485Recive_SetValueOrderCheck();    /* 3. 应答 + CRC 检查 */
-
-    rt_thread_mdelay(50);
-    RS485Send_ReadSingleRingOrder();     /* 4. 读回确认 */
-    rt_thread_mdelay(50);
-    RS485Recive_SingleRingValue();
-    rt_kprintf("Angle = %u.%u\n",
-        tAngleControl.Angle_Current_x10 / 10, tAngleControl.Angle_Current_x10 % 10);
+    /* 只投递命令, 执行/校验/读回由 RS485 服务线程负责(见 rs485_thread_entry) */
+    if (RS485_Post(RS485_OP_SETVAL, Raw) == RT_EOK)
+        rt_kprintf("WriteAngle queued: %u deg -> raw %u\n", TempDeg, Raw);
+    else
+        rt_kprintf("rs485 busy, try again\n");
 }
 //添加命令
 MSH_CMD_EXPORT_ALIAS(RS485Send_SetValueAdjust, WriteAngle, "WriteAngle <0-360> set encoder angle");
@@ -355,13 +353,17 @@ static void RS485Angle_Read(int WordNum ,char *Word[])
          if(rt_strcasecmp(Word[1],"Angle") == 0)
 	   {
 		
-     RS485Send_ReadSingleRingOrder();   /* 1. 发读单圈命令 */
-     rt_thread_mdelay(50);              /* 2. 等应答（传感器14ms应答+收完）*/
-    RS485Recive_SingleRingValue();     /* 3. 解析 + CRC 校验 */
-		   
-		  //打印角度值
-        rt_kprintf("Angle = %u.%u \n",
-        tAngleControl.Angle_Current_x10  / 10,  tAngleControl.Angle_Current_x10  % 10);	  
+		/* 角度由 RS485 服务线程周期读取并更新缓存: 这里只读缓存, 不碰总线 */
+		if (rt_tick_get() - tAngleControl.Angle_Tick < rt_tick_from_millisecond(2000))
+		{
+			rt_kprintf("Angle = %u.%u (cached)\n",
+				tAngleControl.Angle_Current_x10  / 10,  tAngleControl.Angle_Current_x10  % 10);
+		}
+		else
+		{
+			/* 缓存超过2秒没更新 = 服务线程读不到编码器 */
+			rt_kprintf("Read Angle FAIL (encoder no response)\n");
+		}
 	 	
 	  }	
 	else if(rt_strcasecmp(Word[1],"Angle")!= 0)
@@ -378,6 +380,143 @@ static void RS485Angle_Read(int WordNum ,char *Word[])
 }
 //添加命令
 MSH_CMD_EXPORT_ALIAS(RS485Angle_Read ,Read ,"Input: Read Angle");
+
+
+/* 线程内读一次角度并打印(仅限本线程调用): 用于写/复位命令后立即刷新缓存 */
+static void RS485_ServiceReadOnce(void)
+{
+    rt_thread_mdelay(50);              /* 等上一条命令的总线彻底空闲 */
+    RS485Send_ReadSingleRingOrder();
+    rt_thread_mdelay(50);              /* 等应答: 编码器14ms + 7字节传输 */
+    if (RS485Recive_SingleRingValue())
+    {
+        rt_kprintf("[485] Angle = %u.%u\n",
+                   tAngleControl.Angle_Current_x10 / 10,
+                   tAngleControl.Angle_Current_x10 % 10);
+    }
+    else
+    {
+        rt_kprintf("[485] read after cmd FAIL\n");
+    }
+}
+
+/*创建线程主体,防止俩线程同时访问U2,导致帧拆分产生bug*/
+static void rs485_thread_entry(void *param)
+{
+    T_rs485_msg rxmsg;                 /* 收消息用局部变量 */
+
+    /* 上电初始化: 此时无人竞争, 放在线程里做 */
+    RS485Send_DirectionSetOrder(0);
+    rt_thread_mdelay(50);
+
+    for (;;)
+    {
+        /* ---- 1. 固定节拍读角度 → 刷新缓存(供主循环/Read命令用) ---- */
+        RS485Send_ReadSingleRingOrder();
+        rt_thread_mdelay(50);          /* 等应答: 编码器14ms + 7字节传输 */
+        RS485Recive_SingleRingValue(); /* 成功时更新 Angle_Current_x10 / Angle_Tick */
+
+        /* ---- 2. 队列里攒的命令, 一次性执行完(0超时=非阻塞) ---- */
+        while (rt_mq_recv(&g_mq, &rxmsg, sizeof(rxmsg), 0) == RT_EOK)
+        {
+            switch (rxmsg.op)
+            {
+            case RS485_OP_SETVAL:
+                RS485Send_SetValueOrder(rxmsg.val);
+                rt_thread_mdelay(50);
+                RS485Recive_SetValueOrderCheck();
+                RS485_ServiceReadOnce();   /* 写后读回, 立刻刷新角度缓存 */
+                break;
+
+            case RS485_OP_RESET:
+                RS485Send_ResetZeroOrder();
+                rt_thread_mdelay(50);
+                RS485Recive_ResetZeroOrderCheck();
+                RS485_ServiceReadOnce();   /* 置零后读回, 立刻刷新角度缓存 */
+                break;
+
+            case RS485_OP_DIRSET:
+                RS485Send_DirectionSetOrder((uint8_t)rxmsg.val);
+                rt_thread_mdelay(50);
+                break;
+
+            default:
+                break;
+            }
+            /* 以后加了 done 信号量, 在这里: if (rxmsg.done) rt_sem_release(rxmsg.done); */
+        }
+    }
+}
+
+/*下单接口函数,将要使用U2的资源给到static void rs485_thread_entry(void *param)
+这个函数************************************************************************/
+rt_err_t RS485_Post(T_rs485_op op, uint16_t val)
+{
+    T_rs485_msg txmsg;                 /* 发送方局部变量, rt_mq_send 会拷贝走 */
+    txmsg.op  = op;
+    txmsg.val = val;
+    return rt_mq_send(&g_mq, &txmsg, sizeof(txmsg));   /* 满 → -RT_EFULL */
+}
+
+
+
+/*********************************************************************************************************************/
+//rt_mq_init(...)	租下一块仓库地皮 + 办一张仓位证（g_mq）。证上登记：地皮地址、每格多大、共几格；随即把地切成格子并记下
+//"哪些格空着"
+//rt_mq_send(&g_mq, ...)	你拿着证去存货。管理员翻证上的"空闲格清单"，给你一格，把货倒进去，再把这格登记到"已占用"清单末尾
+//rt_mq_recv(&g_mq, ...)	凭证取货。管理员从"已占用"清单头部取一格，把货倒给你，格子收回"空闲"清单
+
+//RS485_Post(RS485_OP_SETVAL, Raw);          /* Raw=386 */
+
+/* 2. RS485_Post 内部: 往消息盒子赋值 */
+//txmsg.op  = RS485_OP_SETVAL;   /* op  盒子里放入数字 2 */
+//txmsg.val = Raw;               /* val 盒子里放入数字 386 */
+//rt_mq_send(&g_mq, &txmsg, sizeof(txmsg));   /* 整个盒子(字节)拷进队列 */
+
+///* 3. 服务线程: 从队列取出盒子 */
+//rt_mq_recv(&g_mq, &rxmsg, sizeof(rxmsg), 0);   /* 盒子拷进 rxmsg, op=2, val=386 */
+
+///* 4. 分发: 拿 op 盒子里的数字去比 case 里的数字 */
+//switch (rxmsg.op)              /* 当前值 = 2 */
+//{
+//case RS485_OP_SETVAL:          /* case 常量 = 2 → 命中! */
+//    RS485Send_SetValueOrder(rxmsg.val);   /* 用参数 386 */
+//    break;
+//case RS485_OP_RESET:           /* = 3, 这次不命中 */
+//...
+//}
+
+
+void RS485_ServiceInit(void)
+{
+    rt_thread_t tid;
+
+    /* 1) 消息队列(静态内存池, 不占堆) */
+    if (rt_mq_init(&g_mq, "rs485mq",
+                   g_mq_pool, sizeof(T_rs485_msg),
+                   sizeof(g_mq_pool), RT_IPC_FLAG_FIFO) != RT_EOK)
+    {
+        rt_kprintf("[485] mq init FAIL\n");
+        return;
+    }
+
+    /* 2) 线程(动态创建, 用堆) */
+    tid = rt_thread_create("rs485",
+                           rs485_thread_entry,
+                           RT_NULL,
+                           RS485_THREAD_STACK,
+                           RS485_THREAD_PRIO,
+                           RS485_THREAD_TICK);
+    if (tid == RT_NULL)
+    {
+        rt_kprintf("[485] thread create FAIL\n");
+        return;
+    }
+    rt_thread_startup(tid);
+    rt_kprintf("[485] service thread started\n");
+}
+
+
 
 
 
