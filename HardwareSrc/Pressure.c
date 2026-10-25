@@ -14,7 +14,9 @@
 #define Press_LifeBase_X100  1500   /* [已弃用] 旧固定基线, 现改为 PressBase 命令实测标称值 */
 #define Press_LifeLow_X100   (Press_LifeBase_X100 * 8 / 10)
 #define Press_LifeHigh_X100  (Press_LifeBase_X100 * 12 / 10)
-#define PRESS_OVERLOAD_X100  2400   /* 过载阈值24MPa(原4000=40MPa超出30MPa量程, 永不触发; 设计24~25MPa停) */
+#define PRESS_OVERLOAD_X100  1800  /* 过载阈值24MPa(原4000=40MPa超出30MPa量程, 永不触发; 设计24~25MPa停) */
+#define PRESS_OVERLOAD_RELEASE_X100 (PRESS_OVERLOAD_X100 - 200)  /* 22MPa: 回落到此值以下才算本次超限结束(回差防抖) */
+#define PRESS_OVERLOAD_REPORT_MAX   3     /* 同一故障周期最多打印几次(putty调试防刷屏) */
 #define PRESS_STUCK_PCT      130    /* 老化/卡滞故障线: 标称值的130% */
 #define PRESS_STUCK_HOLD_CNT 40     /* "持续超线"判定次数(主循环≈10~15ms一次 → 约0.5s): 连续/密集超线达此值才判卡滞, 瞬时尖峰不触发 */
 #define PRESS_BASE_MIN_X100  300    /* 标称值采集下限3MPa(防没顶出压力时误采) */
@@ -165,6 +167,9 @@ static uint8_t  s_Base1Valid = (PRESS_BASE1_DEFAULT_X100 > 0);
 static uint8_t  s_Base2Valid = (PRESS_BASE2_DEFAULT_X100 > 0);
 static uint16_t s_Hold1 = 0;       /* "持续超线"漏桶计数: 超线+1 低于线-1, 达 PRESS_STUCK_HOLD_CNT 判卡滞 */
 static uint16_t s_Hold2 = 0;
+static uint16_t s_TripPeak1 = 0;   /* 最近一次超限事件峰值(停机瞬间压力可能还会冲一下, 持续取最大) */
+static uint16_t s_TripPeak2 = 0;
+static uint8_t  s_OverloadReportCnt = 0;   /* 本故障周期已打印次数(达 PRESS_OVERLOAD_REPORT_MAX 后静默) */
 
 /************************************************************************************************
 *函数名称:Pressure_RunPeakSample
@@ -203,6 +208,19 @@ void Pressure_GetLastPeak(uint16_t *P1, uint16_t *P2)
     if (P2) *P2 = s_LastPeak2;
 }
 
+/* 读取最近一次超限事件的峰值(Modbus/打印用) */
+void Pressure_GetTripPeak(uint16_t *P1, uint16_t *P2)
+{
+    if (P1) *P1 = s_TripPeak1;
+    if (P2) *P2 = s_TripPeak2;
+}
+
+/* 重新允许过载上报(故障复位/全行程正常恢复后调用) */
+void Pressure_OverloadReportReset(void)
+{
+    s_OverloadReportCnt = 0;
+}
+
 /************************************************************************************************
 *函数名称:Pressure_StuckCheck
 *作用:    老化/卡滞故障检查 —— 闭环"正在驱动(未到位)"分支里每圈调用:
@@ -217,7 +235,8 @@ uint8_t Pressure_StuckCheck(void)
         rt_kprintf("[Life] STUCK/aged: P1=%u.%02u MPa held >= %u%% of base %u.%02u (peak %u.%02u), angle NOT reached\n",
                    tPressure.Pressure1_IN3 / 100, tPressure.Pressure1_IN3 % 100, (unsigned)PRESS_STUCK_PCT,
                    s_Base1 / 100, s_Base1 % 100, s_RunPeak1 / 100, s_RunPeak1 % 100);
-        tLife.AlarmFlag = Pressure_Rusting;
+        if (tLife.AlarmFlag != Pressure_Overload)   /* 过载故障优先, 不被老化/卡滞覆盖 */
+            tLife.AlarmFlag = Pressure_Rusting;
         return 1;
     }
     if (s_Base2Valid && s_Hold2 >= PRESS_STUCK_HOLD_CNT)
@@ -225,7 +244,8 @@ uint8_t Pressure_StuckCheck(void)
         rt_kprintf("[Life] STUCK/aged: P2=%u.%02u MPa held >= %u%% of base %u.%02u (peak %u.%02u), angle NOT reached\n",
                    tPressure.Pressure2_IN13 / 100, tPressure.Pressure2_IN13 % 100, (unsigned)PRESS_STUCK_PCT,
                    s_Base2 / 100, s_Base2 % 100, s_RunPeak2 / 100, s_RunPeak2 % 100);
-        tLife.AlarmFlag = Pressure_Rusting;
+        if (tLife.AlarmFlag != Pressure_Overload)   /* 过载故障优先, 不被老化/卡滞覆盖 */
+            tLife.AlarmFlag = Pressure_Rusting;
         return 1;
     }
     return 0;
@@ -255,21 +275,74 @@ void Pressure_LifeCheck(void)
     /* 全行程正常走完(全程没被"持续超压"判据拦停) → 故障恢复;
      * 到位瞬间的峰值含冲击尖峰, 不再单独作为故障依据 */
     if (s_Base1Valid || s_Base2Valid)
+    {
         tLife.AlarmFlag = Pressure_Normal;
+        s_OverloadReportCnt = 0;          /* 已恢复 → 下次过载重新允许上报3次 */
+    }
 }
 
 
-//过载停机,放主循环
- void Press_OverloadStop(void)
+/********************************************************************************************
+*函数名称:Press_OverloadStop
+*作用    :过载(压力超限)保护 —— 主循环每圈调用:
+*         超限 → 立即停机, 记录"当时运行方向"+峰值, 故障码置过载;
+*                同时目标角度锁成当前角度, 压力消失后闭环不会自己重启(防启停振荡);
+*         回落 → 结束本次事件。之后上位机/msh 重新下发目标即可正常再启动,
+*                再超限照样再停(不锁死方向)。
+*备注    :方向取自 Motor.c 的 g_motor_drive_dir(CW=开阀/角度变小, CCW=关阀/角度变大)
+*********************************************************************************************/
+void Press_OverloadStop(void)
 {
-if (Press_OverloadJudge())
-    {
-        MotorDirectionSet(Motor_Dir_Stop);
-        MotorSpeedSet(0);
-        tLife.AlarmFlag = Pressure_Overload;
-        rt_kprintf("OVERLOAD!\n");
-    }
+    uint16_t p1 = tPressure.Pressure1_IN3;
+    uint16_t p2 = tPressure.Pressure2_IN13;
 
+    if (Press_OverloadJudge())
+    {
+        /* 停机 + 记录方向 + 目标锁当前角度(新事件才做, 持续超限只保持停机) */
+        uint8_t is_new = Motor_ProtectTrip();
+
+        if (is_new)                       /* 新事件: 峰值从当前值起算 */
+        {
+            s_TripPeak1 = p1;
+            s_TripPeak2 = p2;
+        }
+        else                              /* 同一次事件: 持续取最大(停机瞬间压力可能还会冲一下) */
+        {
+            if (p1 > s_TripPeak1) s_TripPeak1 = p1;
+            if (p2 > s_TripPeak2) s_TripPeak2 = p2;
+        }
+        if (s_TripPeak1 > tLife.Peak1_X100) tLife.Peak1_X100 = s_TripPeak1;  /* 历史最大峰值 */
+        if (s_TripPeak2 > tLife.Peak2_X100) tLife.Peak2_X100 = s_TripPeak2;
+
+        if (is_new)                       /* 每个事件只在上升沿处理一次 */
+        {
+            tLife.AlarmFlag = Pressure_Overload;
+            tLife.OverloadCount++;
+
+            /* putty 调试防刷屏: 同一故障周期只连报3次, 之后静默;
+             * ProtectReset / 全行程正常恢复后重新计数 */
+            if (s_OverloadReportCnt == 0)
+            {
+                uint8_t i;
+                for (i = 0; i < PRESS_OVERLOAD_REPORT_MAX; i++)
+                {
+                    rt_kprintf("[PROT] OVERLOAD STOP! dir=%s  P1=%u.%02u  P2=%u.%02u MPa  tripPeak P1=%u.%02u P2=%u.%02u\n",
+                               (g_fault_dir == Motor_FaultDir_Open)  ? "OPEN/CW(开阀,角度变小)" :
+                               (g_fault_dir == Motor_FaultDir_Close) ? "CLOSE/CCW(关阀,角度变大)" : "IDLE(停机,方向未知)",
+                               p1 / 100, p1 % 100, p2 / 100, p2 % 100,
+                               s_TripPeak1 / 100, s_TripPeak1 % 100,
+                               s_TripPeak2 / 100, s_TripPeak2 % 100);
+                }
+                s_OverloadReportCnt = PRESS_OVERLOAD_REPORT_MAX;
+            }
+        }
+    }
+    else if (p1 < PRESS_OVERLOAD_RELEASE_X100 && p2 < PRESS_OVERLOAD_RELEASE_X100)
+    {
+        /* 压力回落: 本次事件结束。目标保持当前角度, 不自动重启;
+         * 上位机/msh 重新下发目标(新命令)才恢复驱动 */
+        Motor_ProtectRelease();
+    }
 }
 
 
@@ -431,8 +504,28 @@ static void LifeDbg_Cmd(int argc, char **argv)
                s_LastPeak1 / 100, s_LastPeak1 % 100, s_LastPeak2 / 100, s_LastPeak2 % 100);
     rt_kprintf("Cycle=%u  Alarm=%u (0正常 1锈蚀/老化 2泄漏 3过载)\n",
                tLife.CycleCount, tLife.AlarmFlag);
+    rt_kprintf("Protect dir=%u(%s)  TripPeak P1=%u.%02u P2=%u.%02u MPa  OverloadCnt=%u\n",
+               g_fault_dir,
+               (g_fault_dir == Motor_FaultDir_Open)  ? "开阀/CW" :
+               (g_fault_dir == Motor_FaultDir_Close) ? "关阀/CCW" : "无/停机",
+               s_TripPeak1 / 100, s_TripPeak1 % 100,
+               s_TripPeak2 / 100, s_TripPeak2 % 100,
+               tLife.OverloadCount);
 }
 MSH_CMD_EXPORT_ALIAS(LifeDbg_Cmd, LifeDbg, "Show life/stuck detection state");
+
+/********************************************************************************************
+*msh命令: ProtectReset — 清除过载故障码/解除停机保持
+*备注   : 目标角度仍保持当前角度; 压力若仍超限, 下一圈会立即再次停机报故障
+*********************************************************************************************/
+static void ProtectReset_Cmd(int argc, char **argv)
+{
+    Motor_ProtectReset();
+    Pressure_OverloadReportReset();      /* 复位后下次过载重新报3次 */
+    tLife.AlarmFlag = Pressure_Normal;
+    rt_kprintf("[PROT] fault cleared, target held at %u deg\n", g_target);
+}
+MSH_CMD_EXPORT_ALIAS(ProtectReset_Cmd, ProtectReset, "Clear overload fault/hold (motor stays)");
 
 
 

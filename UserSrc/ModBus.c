@@ -3,6 +3,7 @@
 #include "define.h"
 #include "RS485.h"
 #include "Motor.h"
+#include "Pressure.h"
 
 /******************** 上位机协议: 读当前数据(40011~40014) ********************/
 #define HW_VERSION   1          /* 硬件版本 (40013/0x000C) */
@@ -110,6 +111,9 @@ static void Modbus_Slave_Process(uint8_t *rx, uint8_t len)
             case 1: v = tPressure.Pressure1_IN3;  break;                  /* PLC40002 --00 01   压力1 0.01MPa */
             case 2: v = tPressure.Pressure2_IN13; break;                  /* PLC40003 -- 00 02    压力2 */
             case 3: v = tLife.AlarmFlag;          break;                  /* PLC40004 --00 03    报警字 */
+            case 4: v = g_fault_dir;              break;                  /* PLC40005 --00 04    最近一次过载方向: 0无/停机 1开阀 2关阀 */
+            case 5: { uint16_t tp1, tp2; Pressure_GetTripPeak(&tp1, &tp2); v = tp1; } break; /* PLC40006 --00 05 过载事件峰值P1 */
+            case 6: { uint16_t tp1, tp2; Pressure_GetTripPeak(&tp1, &tp2); v = tp2; } break; /* PLC40007 --00 06 过载事件峰值P2 */
             case 10: v = s_ValveState; break;                             /* PLC40011--00 0A 阀门状态: 0停 1开阀 2关阀 */
             case 11: v = (uint16_t)tAngleControl.Angle_Current_x10; break;/* PLC40012--00 0B 当前开度 0.1° (900=90.0°) */
             case 12: v = HW_VERSION; break;                               /* PLC40013--00 0C 硬件版本 */
@@ -167,6 +171,15 @@ static void Modbus_Slave_Process(uint8_t *rx, uint8_t len)
 //        if (g_target < 4)  g_target = 4;
 //        if (g_target > 94) g_target = 94;
     }
+            break;
+        case 15:                                  /* 40016 -- 00 0F 过载故障复位: 写1清除 */
+            if (val)
+            {
+                Motor_ProtectReset();
+                Pressure_OverloadReportReset();
+                tLife.AlarmFlag = Pressure_Normal;
+                rt_kprintf("[MB] ProtectReset\n");
+            }
             break;
         default:
             return;

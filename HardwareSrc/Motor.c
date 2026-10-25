@@ -34,6 +34,14 @@ static const tValveCfg_Type cfg_small = { 40,             1050,            4,  1
 static uint8_t g_cfg_sel = VALVE_CFG_DEFAULT;   /* 0=Big, 1=Small */
 tValveCfg_Type g_valve_cfg;                     /* 当前生效配置(Valve_CfgApply 填充) */
 
+/*====================== 过载(压力超限)保护状态 ======================*/
+volatile uint8_t  g_motor_drive_dir = Motor_Dir_Stop;       /* 最近一次设定的运行方向 */
+volatile uint8_t  g_fault_dir       = Motor_FaultDir_None;  /* 最近一次超压停机方向 */
+
+static volatile uint8_t  s_trip_active = 0;   /* 超限事件进行中(压力未回落到释放线以下) */
+static volatile uint8_t  s_trip_hold   = 0;   /* 超限停机保持: 未收到新目标前禁止闭环自启 */
+static volatile uint16_t s_trip_target = 0;   /* 停机时锁定的目标角度(=当前角度) */
+
 /* 把选中的配置拷贝到 g_valve_cfg */
 static void Valve_CfgApply(void)
 {
@@ -83,6 +91,8 @@ void Motor_Gpio_Init(void)
 {
     static uint8_t LastDir = 0xFF;   /* 记住上次方向, 0xFF=初始未设 */
 
+    g_motor_drive_dir = Dir;         /* 记录最近一次设定方向: 超压时据此判断"当时在往哪边转" */
+
     if (Dir == LastDir)              /* 方向没变: 继电器不动作, 直接返回 */
         return;
 
@@ -130,6 +140,70 @@ void MotorSpeedSet(int8_t Speed)
 }
 
 
+
+/******************************************************************************************
+*函数名称:Motor_ProtectTrip
+*功能    :压力超限(过载)停机, 压力检测每圈超限时调用
+*逻辑    :① 首次进入事件时记录"当时运行方向"(开阀/关阀), 供故障码上报;
+*          ② 目标角度同步为当前角度 —— 否则停机后压力消失, 闭环发现"未到位"会自己重启,
+*             造成"启停启停"振荡;
+*          ③ 置保持标志: 未收到新目标前 Motor_Control 一律不驱动;
+*          ④ 不锁死方向: 上位机/msh 重新下发目标即解除保持, 可正常再启动,
+*             再超限照样再停机(见 Motor_Control 开头)。
+*返回    :1=本次是新的超限事件(上升沿), 0=同一次事件持续中
+*******************************************************************************************/
+uint8_t Motor_ProtectTrip(void)
+{
+    uint8_t is_new = 0;
+
+    if (!s_trip_active)                         /* 压力回落后第一次超限 = 新事件 */
+    {
+        s_trip_active = 1;
+        is_new = 1;
+
+        /* 记录触发瞬间的运行方向(必须在 MotorDirectionSet(Stop) 之前读) */
+        if (g_motor_drive_dir == Motor_Dir_CW)        g_fault_dir = Motor_FaultDir_Open;
+        else if (g_motor_drive_dir == Motor_Dir_CCW)  g_fault_dir = Motor_FaultDir_Close;
+        else                                          g_fault_dir = Motor_FaultDir_None;
+
+        /* 关键: 目标=当前角度。停机后压力消失, 闭环不再"发现未到位"而自动重启 */
+        if (tAngleControl.Angle_Tick != 0)      /* 角度缓存有效才同步 */
+        {
+            uint32_t cur = (tAngleControl.Angle_Current_x10 + 5) / 10;   /* 0.1° → 度(四舍五入) */
+            if (cur < g_valve_cfg.tgt_min_deg) cur = g_valve_cfg.tgt_min_deg;
+            if (cur > g_valve_cfg.tgt_max_deg) cur = g_valve_cfg.tgt_max_deg;
+            g_target = (uint16_t)cur;
+        }
+        s_trip_target = g_target;                /* 记住锁定目标, 供"新目标=新命令"判断 */
+        s_trip_hold   = 1;                       /* 未收到新目标前禁止再驱动 */
+    }
+
+    MotorSpeedSet(0);                            /* 停机动作 */
+    MotorDirectionSet(Motor_Dir_Stop);
+    return is_new;
+}
+
+/******************************************************************************************
+*函数名称:Motor_ProtectRelease
+*功能    :压力回落到释放线以下时调用, 结束本次超限事件
+*备注    :保持标志 s_trip_hold 不清, 仍等上位机/msh 下发新目标才恢复驱动
+*******************************************************************************************/
+void Motor_ProtectRelease(void)
+{
+    s_trip_active = 0;
+}
+
+/******************************************************************************************
+*函数名称:Motor_ProtectReset
+*功能    :手动/上位机复位过载故障: 解除保持, 允许重新驱动
+*备注    :压力若仍超限, 下一圈检测会立即再次停机报故障(复位无效, 安全)
+*******************************************************************************************/
+void Motor_ProtectReset(void)
+{
+    s_trip_active = 0;
+    s_trip_hold   = 0;
+    g_fault_dir   = Motor_FaultDir_None;
+}
 
 /*********************************************命令测试***********************************/
 static void Motor_Cmd(int WordNum , char *Word[])
@@ -218,6 +292,19 @@ void Motor_Control(uint16_t TargetAngle)
        InPosition   = 0;
        StuckLatched = 0;
        Pressure_RunPeakClear();
+   }
+
+   /*0.5 过载保护保持: 压力超限中, 或超限停机后还没收到新目标 → 一律停机, 不许闭环自启。
+    *    上位机写目标/开阀/关阀 或 msh MotorControl = 新命令 → 解除保持, 可正常再启动;
+    *    再超限照样再停(由 Press_OverloadStop 每圈检测)。 */
+   if (s_trip_hold && TargetAngle != s_trip_target)
+       s_trip_hold = 0;                 /* 收到新目标 → 解除保持 */
+   if (s_trip_active || s_trip_hold)
+   {
+       WasRunning = 0;                  /* 超限停机不算"正常到位", 不触发到位打印/寿命评估 */
+       MotorDirectionSet(Motor_Dir_Stop);
+       MotorSpeedSet(0);
+       return;
    }
 	
    tAngleControl.Angle_DeadEnd = DEADBAND_X10; //死区=DEADBAND_X10(0.1°单位), 在死区内不再控制电机转动

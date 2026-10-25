@@ -222,11 +222,13 @@ void Usart2_Init(void)
   USART2_Handle.Init.OverSampling = UART_OVERSAMPLING_8; //每位采样8次
   HAL_UART_Init(&USART2_Handle);
 
+  /* 帧接收完成事件(信号量)必须先就绪, 再打开 IDLE 中断 */
+  RS485_RxEventInit();
+
   HAL_NVIC_SetPriority(USART2_IRQn, 3, 0);//中断号,抢占优先级,响应优先级
   HAL_NVIC_EnableIRQ(USART2_IRQn);
   __HAL_UART_ENABLE_IT(&USART2_Handle, UART_IT_RXNE);  //使能接收中断
-
-
+  __HAL_UART_ENABLE_IT(&USART2_Handle, UART_IT_IDLE);  //使能总线空闲(帧结束)中断
 }
 
 /*************************************************************************** 
@@ -236,21 +238,27 @@ void Usart2_Init(void)
 volatile uint8_t RX_Flag = 0;
 void USART2_IRQHandler(void)
 {
-   
-    
-  if (__HAL_UART_GET_FLAG(&USART2_Handle, UART_FLAG_RXNE) != RESET)  //接收中断,接收寄存器有数据,SET代表1,有数据
-  {   
-	  RX_Flag = 1;
-    __HAL_UART_CLEAR_FLAG(&USART2_Handle, UART_FLAG_RXNE);  //清除中断标志位
+  rt_interrupt_enter();      /* 进入中断上下文(使用 RT-Thread IPC 必须) */
 
-	  
-    tUsart2_RX.Data[tUsart2_RX.Index++] = (uint8_t)(USART2->RDR & 0xff);  //读取接收寄存器数据,并存入接收缓冲区
+  /* ① 收一个字节 */
+  if (__HAL_UART_GET_FLAG(&USART2_Handle, UART_FLAG_RXNE) != RESET)  //接收中断,接收寄存器有数据,SET代表1,有数据
+  {
+    RX_Flag = 1;
+    tUsart2_RX.Data[tUsart2_RX.Index++] = (uint8_t)(USART2->RDR & 0xff);  //读RDR同时清RXNE,并存入接收缓冲区
     if (tUsart2_RX.Index >= sizeof(tUsart2_RX.Data))  //防止数组越界
     {
       tUsart2_RX.Index = 0;
     }
-   
   }
+
+  /* ② IDLE: 总线空闲 = 一帧接收完成 → 唤醒 RS485 服务线程 */
+  if (__HAL_UART_GET_FLAG(&USART2_Handle, UART_FLAG_IDLE) != RESET)
+  {
+    __HAL_UART_CLEAR_IDLEFLAG(&USART2_Handle);
+    RS485_RxFrameDone();
+  }
+
+  rt_interrupt_leave();      /* 退出中断; 需要切换时在中断返回时完成 */
 }
 
 //标志位函数
