@@ -130,8 +130,7 @@ JingXiaxianmu/
 │   ├── Pressure.c       ADC 滤波、压力换算、过载与卡滞检测
 │   └── RS485.c          U2 编码器总线服务线程（唯一持有者 + 消息队列）
 ├── project.uvprojx      Keil MDK 工程
-├── rtconfig.h           RT-Thread 裁剪配置
-└── LICENSE              Apache License 2.0
+└── rtconfig.h           RT-Thread 裁剪配置
 ```
 
 ### 软件架构要点
@@ -192,8 +191,9 @@ stm32l4_example/
 
 ---
 
-## 许可证
-
-[Apache License 2.0](LICENSE)
+## 版权
 
 Copyright (c) 2026 we595
+
+本仓库未附加开源许可证，默认**保留所有权利（All Rights Reserved）**。
+代码公开仅供阅读参考，如需使用请联系作者获取授权。

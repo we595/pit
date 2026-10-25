@@ -1,8 +1,6 @@
 /*
  * Copyright (c) 2026, JingXiaxianmu Team
  *
- * SPDX-License-Identifier: Apache-2.0
- *
  * Change Logs:
  * Date           Author          Notes
  * 2026-08-12     JingXiaxianmu   first implementation (开发平台骨架)
